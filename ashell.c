@@ -4,6 +4,11 @@
 
 #define STRING_DESCRIPTOR_SIZE 40
 
+// ADB Interface Specifications
+#define ADB_CLASS 0xff
+#define ADB_SUBCLASS 0x42
+#define ADB_PROTOCOL 0x1
+
 static void print_open_error(int error)
 {
   char *error_str;
@@ -31,20 +36,52 @@ static void access_device_handle(libusb_device *device, libusb_device_handle *ha
   if (err != 0) {
 	printf("Error reading descriptor (");
 	print_open_error(err);
-	printf(")\n");
+	printf(")");
   } else {
-	unsigned char data[STRING_DESCRIPTOR_SIZE];
+	unsigned char string_des[STRING_DESCRIPTOR_SIZE];
 
-	int len = libusb_get_string_descriptor_ascii(handle, desc->iProduct, data, STRING_DESCRIPTOR_SIZE);
+	int len = libusb_get_string_descriptor_ascii(handle, desc->iProduct, string_des, STRING_DESCRIPTOR_SIZE);
 	if (len >= 0) {
-	  //printf("bytes read: %d\n", len);
-	  printf("%s\n", data);
+	  printf("%s", string_des);
 	} else {
 	  printf("Error reading descriptor (");
 	  print_open_error(len);
-	  printf(")\n");
+	  printf(")");
 	}
   }
+}
+
+static int is_adb_interface(int usb_class, int usb_subclass, int usb_protocol) {
+  //TODO: Check if vendor id of device is whitelisted
+  return usb_class == ADB_CLASS && usb_subclass == ADB_SUBCLASS && usb_protocol == ADB_PROTOCOL;
+}
+
+static int check_adb(libusb_device *device, libusb_device_handle *handle) {
+  struct libusb_device_descriptor *desc = malloc(sizeof(struct libusb_device_descriptor));
+  int err = libusb_get_device_descriptor(device, desc);
+  if (err != 0) {
+	return 0;
+  }
+  
+  struct libusb_config_descriptor *config;
+  err = libusb_get_active_config_descriptor(device, &config);
+  if (err != 0) {
+	return 0;
+  }
+
+  const struct libusb_interface *interfaces = config->interface;
+  /* TODO: Consider alternate interface settings
+	 const struct libusb_interface_descriptor *interfaces = config->interface->altsetting;
+	 int num_altsetting = config->interface->num_altsetting; */
+  for (int i = 0; i < config->bNumInterfaces; i++) {
+	const struct libusb_interface_descriptor *idesc = (interfaces + i)->altsetting;
+	if (is_adb_interface(idesc->bInterfaceClass, idesc->bInterfaceSubClass, idesc->bInterfaceProtocol)) {
+	  printf(" **ADB-compliant");
+	}
+  }
+
+  libusb_free_config_descriptor(config);
+  return 1;
 }
 
 int main(int argc, char **argv)
@@ -65,11 +102,13 @@ int main(int argc, char **argv)
 	printf("%zd: ", i);
 	if (err == 0) {
 	  access_device_handle(devices[i], handle);
+	  check_adb(devices[i], handle);
+	  printf("\n");
 	  libusb_close(handle);
 	} else {
-	  printf("Error reading device");
+	  printf("Error opening device (");
 	  print_open_error(err);
-	  printf("\n");
+	  printf(")\n");
 	}
   }
 
