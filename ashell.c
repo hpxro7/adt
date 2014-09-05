@@ -112,7 +112,6 @@ static int filter_adb_devices(libusb_device **src, libusb_device **dst, int max)
 	libusb_device_handle *handle;
 	int err = libusb_open(src[i], &handle);
 	if (err) {
-	  libusb_close(handle);
 	  continue;
 	}
 	if (has_adb_endpoints(src[i], handle)) {
@@ -121,6 +120,15 @@ static int filter_adb_devices(libusb_device **src, libusb_device **dst, int max)
 	libusb_close(handle);
   }
   return num_found;
+}
+
+static void adb_shell(libusb_device *device) {
+  libusb_device_handle *handle;
+  int err = libusb_open(device, &handle);
+  if (err) {
+	printf("Could not connect to device");
+	exit(1);
+  }
 }
 
 int main(int argc, char **argv)
@@ -141,6 +149,7 @@ int main(int argc, char **argv)
   } else {
 	printf("Adb compatible devices:\n");
 	print_devices(adb_devices, devices_found);
+	adb_shell(adb_devices[0]);
   }
   free(adb_devices);
 
