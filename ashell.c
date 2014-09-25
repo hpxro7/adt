@@ -142,8 +142,8 @@ int main(int argc, char **argv)
 
   print_devices(devices, cnt);
   
-  libusb_device **adb_devices = malloc(sizeof(libusb_device*) * ADB_DEVICE_BUFFER_SIZE);
-  int devices_found = filter_adb_devices(devices, adb_devices, ADB_DEVICE_BUFFER_SIZE);
+  libusb_device **adb_devices = malloc(sizeof(libusb_device*) * cnt);
+  int devices_found = filter_adb_devices(devices, adb_devices, cnt);
   if (!devices_found) {
 	printf("No adb compatible devices found\n");
   } else {
