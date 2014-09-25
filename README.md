@@ -1,7 +1,7 @@
 Android Debug Tunnel
 ======
 
-> Because Gophers don't bridge. They tunnel.
+> Because gophers don't bridge. They tunnel.
 
 An implementation of the ADB Host protocol over USB transport in Go.
 
