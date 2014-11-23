@@ -137,6 +137,7 @@ int main(int argc, char **argv)
   libusb_device **devices;
   ssize_t cnt = libusb_get_device_list(NULL, &devices);
   if (cnt < 0) {
+	fprintf(stderr, "Could not obtain device list\n")
 	exit(1);
   }
 
