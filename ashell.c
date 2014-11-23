@@ -41,7 +41,8 @@ static void print_device_info(libusb_device *device, libusb_device_handle *handl
   } else {
 	unsigned char string_des[STRING_DESCRIPTOR_SIZE];
 
-	int len = libusb_get_string_descriptor_ascii(handle, desc.iProduct, string_des, STRING_DESCRIPTOR_SIZE);
+	int len = libusb_get_string_descriptor_ascii(handle, desc.iProduct, string_des,
+												 STRING_DESCRIPTOR_SIZE);
 	if (len >= 0) {
 	  printf("%s", string_des);
 	} else {
@@ -74,7 +75,7 @@ static int is_adb_interface(int usb_class, int usb_subclass, int usb_protocol) {
   return usb_class == ADB_CLASS && usb_subclass == ADB_SUBCLASS && usb_protocol == ADB_PROTOCOL;
 }
 
-static int has_adb_endpoints(libusb_device *device, libusb_device_handle *handle) {
+static int has_adb_endpoints(libusb_device *device) {
   struct libusb_device_descriptor desc;
   int err = libusb_get_device_descriptor(device, &desc);
   if (err != 0) {
@@ -91,10 +92,12 @@ static int has_adb_endpoints(libusb_device *device, libusb_device_handle *handle
   int num_interfaces = config->bNumInterfaces;
   // TODO: Consider alternate interface settings
   // const struct libusb_interface_descriptor *interfaces = config->interface->altsetting;
-  // int num_altsetting = config->interface->num_altsetting;
+  // int num_altsetting = config->interface-i>num_altsetting;
   for (int i = 0; i < num_interfaces; i++) {
 	const struct libusb_interface_descriptor *idesc = (interfaces + i)->altsetting;
-	if (is_adb_interface(idesc->bInterfaceClass, idesc->bInterfaceSubClass, idesc->bInterfaceProtocol)) {
+	if (idesc->bNumEndpoints == 2 &&
+		is_adb_interface(idesc->bInterfaceClass, idesc->bInterfaceSubClass,
+						 idesc->bInterfaceProtocol)) {
 	  return 1;
 	}
   }
@@ -114,7 +117,7 @@ static int filter_adb_devices(libusb_device **src, libusb_device **dst, int max)
 	if (err) {
 	  continue;
 	}
-	if (has_adb_endpoints(src[i], handle)) {
+	if (has_adb_endpoints(src[i])) {
 	  dst[num_found++] = src[i];
 	}
 	libusb_close(handle);
@@ -137,7 +140,7 @@ int main(int argc, char **argv)
   libusb_device **devices;
   ssize_t cnt = libusb_get_device_list(NULL, &devices);
   if (cnt < 0) {
-	fprintf(stderr, "Could not obtain device list\n")
+	fprintf(stderr, "Could not obtain device list\n");
 	exit(1);
   }
 

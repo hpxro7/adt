@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-std=c11 -Wall -g
+CFLAGS=-std=c11 -Wall -g -Wpedantic
 SRCS=ashell.c
 LIBS=-lusb-1.0
 
