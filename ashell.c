@@ -10,6 +10,15 @@
 #define ADB_SUBCLASS 0x42
 #define ADB_PROTOCOL 0x1
 
+struct message {
+  unsigned command;
+  unsigned arg0;
+  unsigned arg1;
+  unsigned data_length;
+  unsigned data_crc32;
+  unsigned magic;
+};
+
 static void print_open_error(int error)
 {
   const char *error_str;
@@ -128,9 +137,89 @@ static int filter_adb_devices(libusb_device **src, libusb_device **dst, int max)
 static void adb_shell(libusb_device *device) {
   libusb_device_handle *handle;
   int err = libusb_open(device, &handle);
+
   if (err) {
-	printf("Could not connect to device");
+	fprintf(stderr, "Could not connect to device");
 	exit(1);
+  }
+
+  struct libusb_device_descriptor desc;
+  err = libusb_get_device_descriptor(device, &desc);
+  if (err) {
+	fprintf(stderr, "Could not get device descriptor");
+	exit(1);
+  }
+
+  struct libusb_config_descriptor *config;
+  err = libusb_get_active_config_descriptor(device, &config);
+  if (err) {
+	fprintf(stderr, "Could not get active config descriptor");
+	exit(1);
+  }
+
+  uint8_t ep_in = 0, ep_out = 0;
+
+  const struct libusb_interface *interfaces = config->interface;
+  int interfaces_size = config->bNumInterfaces;
+  for (int i = 0; i < interfaces_size; i++) {
+	const struct libusb_interface_descriptor *i_desc = (interfaces + i)->altsetting;
+	if (i_desc->bNumEndpoints == 2 &&
+		is_adb_interface(i_desc->bInterfaceClass, i_desc->bInterfaceSubClass,
+						 i_desc->bInterfaceProtocol)) {
+	  const struct libusb_endpoint_descriptor *endpoints = i_desc->endpoint;
+
+	  if ((endpoints[0].bmAttributes & LIBUSB_TRANSFER_TYPE_BULK) != 0 &&
+		  (endpoints[1].bmAttributes & LIBUSB_TRANSFER_TYPE_BULK) != 0) {
+		printf("Endpoints support bulk transfer!\n");
+
+		// First endpoint is IN endpoint
+		if ((endpoints[0].bEndpointAddress & LIBUSB_ENDPOINT_IN) != 0) {
+		  ep_in = endpoints[0].bEndpointAddress;
+		  ep_out = endpoints[1].bEndpointAddress;
+		} else {
+		  ep_in = endpoints[1].bEndpointAddress;
+		  ep_out = endpoints[0].bEndpointAddress;
+		}
+	  }
+	  break;
+	}
+  }
+
+  int trans;
+  struct message con_message = {0x4e584e43, 0x1000000, 4096, 7, 562, 2980557244};
+  unsigned char *databuf = calloc(sizeof(unsigned char), 100);
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *)&con_message, 24, &trans, 0);
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) "host::", 7, &trans, 0);
+
+  if (err != 0) {
+	printf("Error occured when trying to write data\n");
+  } else {
+	printf("Successfully sent %d bytes!\n", trans);
+	err = libusb_bulk_transfer(handle, ep_in, databuf, 100, &trans, 0);
+	printf("READ THIS: %s\n", databuf);
+	if (err != 0) {
+	  printf("Error occured when trying to read data: ");
+	  switch (err) {
+	  case LIBUSB_ERROR_TIMEOUT:
+		printf("TIMEOUT");
+		break;
+	  case LIBUSB_ERROR_PIPE:
+		printf("ENDPOINT HALTED");
+		break;
+	  case LIBUSB_ERROR_OVERFLOW:
+		printf("ENDPOINT OVERFLOWED");
+		break;
+	  case LIBUSB_ERROR_NO_DEVICE:
+		printf("DEVICE DISCONNECTED");
+		break;
+	  default:
+		printf("UNKNOWN ERROR");
+		break;
+	  }
+	  printf("(%d)\n", err);
+	} else {
+	  printf("Successfully read %d bytes!\n", trans);
+	}
   }
 }
 
