@@ -1,9 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <libusb-1.0/libusb.h>
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
 
 #define STRING_DESCRIPTOR_SIZE 40
 #define ADB_DEVICE_BUFFER_SIZE 3
+#define ADB_PRIVATE_KEY "/home/zac/.android/adbkey"
 
 // ADB Interface Specifications
 #define ADB_CLASS 0xff
@@ -15,7 +18,7 @@ struct message {
   unsigned arg0;
   unsigned arg1;
   unsigned data_length;
-  unsigned data_crc32;
+  unsigned data_checksum;
   unsigned magic;
 };
 
@@ -134,6 +137,54 @@ static int filter_adb_devices(libusb_device **src, libusb_device **dst, int max)
   return num_found;
 }
 
+static void get_rsa_key(RSA **key) {
+  *key = RSA_new();
+  FILE *f = fopen(ADB_PRIVATE_KEY, "r");
+  if (!f) {
+	fprintf(stderr, "Failed to open private key file\n");
+	exit(1);
+  }
+
+  if (!PEM_read_RSAPrivateKey(f, key, NULL, NULL)) {
+	fprintf(stderr, "Failed to read private key\n");
+  } else {
+	fprintf(stderr, "Successfully read private key!\n");
+  }
+
+  fclose(f);
+}
+
+static int get_checksum(char *buf, int buflen) {
+  int sum = 0;
+  while (buflen > 0) {
+	sum += *buf++;
+	buflen--;
+  }
+  return sum;
+}
+
+static void print_adb_protocol_error(int err_code) {
+  printf("Error occured when trying to read data: ");
+  switch (err_code) {
+  case LIBUSB_ERROR_TIMEOUT:
+	printf("TIMEOUT");
+	break;
+  case LIBUSB_ERROR_PIPE:
+	printf("ENDPOINT HALTED");
+	break;
+  case LIBUSB_ERROR_OVERFLOW:
+	printf("ENDPOINT OVERFLOWED");
+	break;
+  case LIBUSB_ERROR_NO_DEVICE:
+	printf("DEVICE DISCONNECTED");
+	break;
+  default:
+	printf("UNKNOWN ERROR");
+	break;
+  }
+  printf("(%d)\n", err_code);
+}
+
 static void adb_shell(libusb_device *device) {
   libusb_device_handle *handle;
   int err = libusb_open(device, &handle);
@@ -185,42 +236,75 @@ static void adb_shell(libusb_device *device) {
 	}
   }
 
+  // Setup private key for ADB Host
+  RSA *key;
+  get_rsa_key(&key);
+
+  // Send connection message and expected host payload
   int trans;
-  struct message con_message = {0x4e584e43, 0x1000000, 4096, 7, 562, 2980557244};
+  struct message con_message = {0x4e584e43, 0x1000000, 4096, 6, get_checksum("host::", 6), 2980557244};
   unsigned char *databuf = calloc(sizeof(unsigned char), 100);
   err = libusb_bulk_transfer(handle, ep_out, (unsigned char *)&con_message, 24, &trans, 0);
-  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) "host::", 7, &trans, 0);
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) "host::", 6, &trans, 0);
 
   if (err != 0) {
-	printf("Error occured when trying to write data\n");
-  } else {
-	printf("Successfully sent %d bytes!\n", trans);
-	err = libusb_bulk_transfer(handle, ep_in, databuf, 100, &trans, 0);
-	printf("READ THIS: %s\n", databuf);
-	if (err != 0) {
-	  printf("Error occured when trying to read data: ");
-	  switch (err) {
-	  case LIBUSB_ERROR_TIMEOUT:
-		printf("TIMEOUT");
-		break;
-	  case LIBUSB_ERROR_PIPE:
-		printf("ENDPOINT HALTED");
-		break;
-	  case LIBUSB_ERROR_OVERFLOW:
-		printf("ENDPOINT OVERFLOWED");
-		break;
-	  case LIBUSB_ERROR_NO_DEVICE:
-		printf("DEVICE DISCONNECTED");
-		break;
-	  default:
-		printf("UNKNOWN ERROR");
-		break;
-	  }
-	  printf("(%d)\n", err);
-	} else {
-	  printf("Successfully read %d bytes!\n", trans);
-	}
+	fprintf(stderr, "Error occured when trying to write data\n");
+	print_adb_protocol_error(err);
+	exit(1);
   }
+
+  printf("Successfully sent %d bytes!\n", trans);
+  
+  // ADB client device show now be requesting AUTH, respond appropriately
+  // We want to try signing the random token received with our private key until we match
+  // with what the ADB client has in store. For now we assume that the client already has
+  // registered with our public key.
+  // TODO(zac): Implement RSAPUBLICKEY(3) logic
+
+  err = libusb_bulk_transfer(handle, ep_in, databuf, 100, &trans, 0);  
+  int connected = 0;
+  while (!connected) {
+	if (err != 0) {
+	  print_adb_protocol_error(err);
+	  exit(1);
+	}
+
+	printf("Successfully read \"%s\" (%d bytes)!\n", databuf, trans);
+	printf("Signing random token with private key and attemping to connect...\n");
+	unsigned char *sig = (unsigned char *) malloc(RSA_size(key));
+	unsigned siglen;
+
+	if (!RSA_sign(NID_sha1, databuf, trans, sig, &siglen, key)) {
+	  fprintf(stderr, "Could not sign token\n");
+	  exit(1);
+	}
+
+	printf("Sending signature of length %d and checksum %d\n", siglen, get_checksum((char *)sig, siglen));
+
+	struct message auth_message = {0x48545541, 2, 0, siglen, get_checksum((char *)sig, siglen) + 1, 0xb7abaabe};
+	err = libusb_bulk_transfer(handle, ep_out, (unsigned char *)&auth_message, 24, &trans, 0);
+	if (err != 0) {
+	  print_adb_protocol_error(err);
+	  exit(1);
+	}
+
+	err = libusb_bulk_transfer(handle, ep_out, sig, siglen, &trans, 0);
+	if (err != 0) {
+	  print_adb_protocol_error(err);
+	  exit(1);
+	}
+
+	printf("Successfully sent %d bytes!\n", trans);
+
+	err = libusb_bulk_transfer(handle, ep_in, databuf, 100, &trans, 0);
+	if (err != 0) {
+	  print_adb_protocol_error(err);
+	  exit(1);
+	}
+
+	printf("Successfully read after AUTH \"%s\" (%d bytes)!\n", databuf, trans);
+  }
+
 }
 
 int main(int argc, char **argv)
