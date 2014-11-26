@@ -13,14 +13,21 @@
 #define ADB_SUBCLASS 0x42
 #define ADB_PROTOCOL 0x1
 
-struct message {
+#define COM_CNXN 0x4e584e43
+#define COM_AUTH 0x48545541
+#define COM_OPEN 0x4e45504f
+#define COM_OKAY 0x59414b4f
+#define COM_WRTE 0x45545257
+#define COM_CLSE 0x45534c43
+
+typedef struct message {
   unsigned command;
   unsigned arg0;
   unsigned arg1;
   unsigned data_length;
   unsigned data_checksum;
   unsigned magic;
-};
+} *amessage;
 
 static void print_open_error(int error)
 {
