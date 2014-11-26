@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <libusb-1.0/libusb.h>
 #include <openssl/rsa.h>
@@ -191,7 +192,7 @@ static void print_adb_protocol_error(int err_code) {
   printf("(%d)\n", err_code);
 }
 
-static void adb_shell(libusb_device *device) {
+static void adb_shell(libusb_device *device, char *command) {
   libusb_device_handle *handle;
   int err = libusb_open(device, &handle);
 
@@ -249,7 +250,7 @@ static void adb_shell(libusb_device *device) {
   // Send connection message and expected host payload
   int trans;
   unsigned char *host_msg = (unsigned char *) "host::";
-  struct message con_message = {0x4e584e43, 0x1000000, 4096, 6, get_checksum(host_msg, 7), 2980557244};
+  struct message con_message = {COM_CNXN, 0x1000000, 4096, 6, get_checksum(host_msg, 7), 2980557244};
   unsigned char *databuf = calloc(sizeof(unsigned char), 100);
   err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) &con_message, 24, &trans, 0);
   err = libusb_bulk_transfer(handle, ep_out, host_msg, 7, &trans, 0);
@@ -293,7 +294,7 @@ static void adb_shell(libusb_device *device) {
 
   printf("Sending signature of %d bytes and checksum %d\n", siglen, get_checksum(sig, siglen));
 
-  struct message auth_message = {0x48545541, 2, 0, siglen, get_checksum(sig, siglen), 0xb7abaabe};
+  struct message auth_message = {COM_AUTH, 2, 0, siglen, get_checksum(sig, siglen), 0xb7abaabe};
   err = libusb_bulk_transfer(handle, ep_out, (unsigned char *)&auth_message, 24, &trans, 0);
   if (err != 0) {
 	print_adb_protocol_error(err);
@@ -316,10 +317,107 @@ static void adb_shell(libusb_device *device) {
 
   printf("Successfully read after AUTH \"%s\" (%d bytes)!\n", databuf, trans);
 
+  amessage cnxn_response = (amessage) malloc(sizeof(struct message));
+  memcpy(cnxn_response, databuf, sizeof(struct message));
+
+  err = libusb_bulk_transfer(handle, ep_in, databuf, cnxn_response->data_length, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+
+  printf("Client information: %s\n", databuf);
+
+  unsigned local_stream_id = 4;
+  char *shell = (char *) malloc(sizeof(char) * (6 + strlen(command) + 1));
+  sprintf(shell, "shell:%s", command);
+  int shell_len = strlen(shell);
+  // Begin sending a shell request via a stream 
+  struct message open_message = {COM_OPEN, local_stream_id, 0, shell_len + 1, get_checksum((unsigned char *)shell, shell_len), 0xb1baafb0};
+
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) &open_message, 24, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+  printf("Sent OPEN request on stream %d\n", local_stream_id);
+
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) shell, shell_len + 1, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+  printf("Sent OPEN shell payload request: %s(%d bytes)\n", shell, shell_len);
+
+  // Read OKAY header
+  err = libusb_bulk_transfer(handle, ep_in, databuf, 24, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+  amessage open_response = (amessage) malloc(sizeof(struct message));
+  memcpy(open_response, databuf, sizeof(struct message));
+  unsigned remote_stream_id = open_response->arg0;
+  printf("ADB client device sent OKAY.\n");
+  printf("Ready to begin reading data from remote-id: %d to local-id: %d\n", remote_stream_id, local_stream_id);
+
+  // Read WRITE header
+  err = libusb_bulk_transfer(handle, ep_in, databuf, 24, &trans, 0);
+  amessage next_response = (amessage) malloc(sizeof(struct message));
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+  memcpy(next_response, databuf, sizeof(struct message));
+  unsigned read = 0;
+  unsigned char *resbuf = calloc(sizeof(unsigned char), 1024);
+
+  while (next_response->command == COM_WRTE) {
+	printf("Received WRTE (%d bytes) header\n", next_response->data_length);
+	err = libusb_bulk_transfer(handle, ep_in, resbuf + read, next_response->data_length, &trans, 0);
+	if (err != 0) {
+	  print_adb_protocol_error(err);
+	  exit(1);
+	}
+	read += trans;
+
+	struct message okay_message = {COM_OKAY, local_stream_id, remote_stream_id, 0, 0, COM_OKAY ^ 0xffffffff};
+	err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) &okay_message, 24, &trans, 0);
+	if (err != 0) {
+	  print_adb_protocol_error(err);
+	  exit(1);
+	}
+	printf("Sent OKAY(local: %d, remote:%d)\n", local_stream_id, remote_stream_id);
+
+	err = libusb_bulk_transfer(handle, ep_in, databuf, 24, &trans, 0);
+	if (err != 0) {
+	  print_adb_protocol_error(err);
+	  exit(1);
+	}
+	
+	memcpy(next_response, databuf, sizeof(struct message));
+  }
+
+  printf("shell WRTE response:\n %s", resbuf);
+  printf("ADB client sent %d bytes\n", read);
+
+  // Read remote to local WRITE payload
+  struct message close_message = {COM_CLSE, local_stream_id, remote_stream_id, 0, 0, COM_CLSE ^ 0xffffffff};
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) &close_message, 24, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+  printf("Successfully closed remote stream on %d\n", remote_stream_id);
+  
 }
 
 int main(int argc, char **argv)
 { // When in rome... :(
+  if (argc < 2 || argc >= 3) {
+	printf("Usage: ./ashell [command]\n");
+	exit(1);
+  }
   libusb_init(NULL);
   libusb_device **devices;
   ssize_t cnt = libusb_get_device_list(NULL, &devices);
@@ -327,8 +425,6 @@ int main(int argc, char **argv)
 	fprintf(stderr, "Could not obtain device list\n");
 	exit(1);
   }
-
-  print_devices(devices, cnt);
   
   libusb_device **adb_devices = malloc(sizeof(libusb_device*) * cnt);
   int devices_found = filter_adb_devices(devices, adb_devices, cnt);
@@ -337,7 +433,7 @@ int main(int argc, char **argv)
   } else {
 	printf("Adb compatible devices:\n");
 	print_devices(adb_devices, devices_found);
-	adb_shell(adb_devices[0]);
+	adb_shell(adb_devices[0], argv[1]);
   }
   free(adb_devices);
 
