@@ -154,11 +154,10 @@ static void get_rsa_key(RSA **key) {
   fclose(f);
 }
 
-static int get_checksum(char *buf, int buflen) {
-  int sum = 0;
-  while (buflen > 0) {
+static int get_checksum(unsigned char *buf, int buflen) {
+  unsigned sum = 0;
+  while (buflen-- > 0) {
 	sum += *buf++;
-	buflen--;
   }
   return sum;
 }
@@ -242,10 +241,11 @@ static void adb_shell(libusb_device *device) {
 
   // Send connection message and expected host payload
   int trans;
-  struct message con_message = {0x4e584e43, 0x1000000, 4096, 6, get_checksum("host::", 6), 2980557244};
+  unsigned char *host_msg = (unsigned char *) "host::";
+  struct message con_message = {0x4e584e43, 0x1000000, 4096, 6, get_checksum(host_msg, 7), 2980557244};
   unsigned char *databuf = calloc(sizeof(unsigned char), 100);
-  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *)&con_message, 24, &trans, 0);
-  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) "host::", 6, &trans, 0);
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) &con_message, 24, &trans, 0);
+  err = libusb_bulk_transfer(handle, ep_out, host_msg, 7, &trans, 0);
 
   if (err != 0) {
 	fprintf(stderr, "Error occured when trying to write data\n");
@@ -261,49 +261,53 @@ static void adb_shell(libusb_device *device) {
   // registered with our public key.
   // TODO(zac): Implement RSAPUBLICKEY(3) logic
 
-  err = libusb_bulk_transfer(handle, ep_in, databuf, 100, &trans, 0);  
-  int connected = 0;
-  while (!connected) {
-	if (err != 0) {
-	  print_adb_protocol_error(err);
-	  exit(1);
-	}
-
-	printf("Successfully read \"%s\" (%d bytes)!\n", databuf, trans);
-	printf("Signing random token with private key and attemping to connect...\n");
-	unsigned char *sig = (unsigned char *) malloc(RSA_size(key));
-	unsigned siglen;
-
-	if (!RSA_sign(NID_sha1, databuf, trans, sig, &siglen, key)) {
-	  fprintf(stderr, "Could not sign token\n");
-	  exit(1);
-	}
-
-	printf("Sending signature of length %d and checksum %d\n", siglen, get_checksum((char *)sig, siglen));
-
-	struct message auth_message = {0x48545541, 2, 0, siglen, get_checksum((char *)sig, siglen) + 1, 0xb7abaabe};
-	err = libusb_bulk_transfer(handle, ep_out, (unsigned char *)&auth_message, 24, &trans, 0);
-	if (err != 0) {
-	  print_adb_protocol_error(err);
-	  exit(1);
-	}
-
-	err = libusb_bulk_transfer(handle, ep_out, sig, siglen, &trans, 0);
-	if (err != 0) {
-	  print_adb_protocol_error(err);
-	  exit(1);
-	}
-
-	printf("Successfully sent %d bytes!\n", trans);
-
-	err = libusb_bulk_transfer(handle, ep_in, databuf, 100, &trans, 0);
-	if (err != 0) {
-	  print_adb_protocol_error(err);
-	  exit(1);
-	}
-
-	printf("Successfully read after AUTH \"%s\" (%d bytes)!\n", databuf, trans);
+  err = libusb_bulk_transfer(handle, ep_in, databuf, 24, &trans, 0);  
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
   }
+  printf("Successfully read \"%s\" (%d bytes) which should be AUTH header!\n", databuf, trans);
+
+  err = libusb_bulk_transfer(handle, ep_in, databuf, 20, &trans, 0);  
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+  printf("Successfully read \"%s\" (%d bytes)!\n", databuf, trans);
+  
+  printf("Signing random token with private key and attemping to connect...\n");
+  unsigned char *sig = (unsigned char *) malloc(RSA_size(key));
+  unsigned siglen = 0;
+
+  if (!RSA_sign(NID_sha1, databuf, trans, sig, &siglen, key)) {
+	fprintf(stderr, "Could not sign token\n");
+	exit(1);
+  }
+
+  printf("Sending signature of %d bytes and checksum %d\n", siglen, get_checksum(sig, siglen));
+
+  struct message auth_message = {0x48545541, 2, 0, siglen, get_checksum(sig, siglen), 0xb7abaabe};
+  err = libusb_bulk_transfer(handle, ep_out, (unsigned char *)&auth_message, 24, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+
+  err = libusb_bulk_transfer(handle, ep_out, sig, siglen, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+
+  printf("Successfully sent %d bytes!\n", trans);
+
+  err = libusb_bulk_transfer(handle, ep_in, databuf, 100, &trans, 0);
+  if (err != 0) {
+	print_adb_protocol_error(err);
+	exit(1);
+  }
+
+  printf("Successfully read after AUTH \"%s\" (%d bytes)!\n", databuf, trans);
 
 }
 
