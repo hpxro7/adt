@@ -329,10 +329,9 @@ static void adb_shell(libusb_device *device, char *command) {
   printf("Client information: %s\n", databuf);
 
   unsigned local_stream_id = 4;
-  char *shell = (char *) malloc(sizeof(char) * (6 + strlen(command) + 1));
-  sprintf(shell, "shell:%s", command);
+  char *shell = command;
   int shell_len = strlen(shell);
-  // Begin sending a shell request via a stream 
+  // Begin sending service request via a stream 
   struct message open_message = {COM_OPEN, local_stream_id, 0, shell_len + 1, get_checksum((unsigned char *)shell, shell_len), 0xb1baafb0};
 
   err = libusb_bulk_transfer(handle, ep_out, (unsigned char *) &open_message, 24, &trans, 0);
@@ -398,7 +397,7 @@ static void adb_shell(libusb_device *device, char *command) {
 	memcpy(next_response, databuf, sizeof(struct message));
   }
 
-  printf("shell WRTE response:\n %s", resbuf);
+  printf("command WRTE response:\n %s", resbuf);
   printf("ADB client sent %d bytes\n", read);
 
   // Read remote to local WRITE payload
@@ -415,7 +414,7 @@ static void adb_shell(libusb_device *device, char *command) {
 int main(int argc, char **argv)
 { // When in rome... :(
   if (argc < 2 || argc >= 3) {
-	printf("Usage: ./ashell [command]\n");
+	printf("Usage: ./ashell [service command]\n");
 	exit(1);
   }
   libusb_init(NULL);
